@@ -14,15 +14,7 @@ val json = Json {
 }
 
 fun main(vararg args: String) {
-    val projectIdRegex = args[0].toRegex()
-    gatherProjectIds(projectIdRegex).forEach { projectId ->
-        getAllResolvePagination<HotspotResults> { page: Int -> hotspotRequest(projectId, page) }
-            .flatMap { it.hotspots }
-            .filter { it.message.contains("The content length limit of") || it.message.contains("Make sure not setting any maximum content length limit is safe here.") }
-            //.filter { it.message.contains("accessing the Android external storage") }
-            //.filter { it.key.equals("java:S5693") }
-            .forEach { hotspot -> println("$projectId: ${hotspotWebApi(projectId, hotspot.key)}") }
-    }
+    Downloader().main(args)
 }
 
 fun hotspotRequest(projectKey: String, page: Int) = "https://peach.sonarsource.com/api/hotspots/search".authGet(
@@ -40,8 +32,6 @@ fun projectsRequest(page: Int) = "https://peach.sonarsource.com/api/projects/sea
     )
 )
 
-fun hotspotWebApi(projectKey: String, issueKey: String) =
-    "https://peach.sonarsource.com/security_hotspots?id=${projectKey}&hotspots=${issueKey}"
 
 fun String.authGet(parameters: Parameters? = null) =
     httpGet(parameters).authentication().basic(username = System.getenv("PEACH_TOKEN"), password = "")
