@@ -3,8 +3,10 @@ package com.sonarsource.jbeleites.hotspotdownloader
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.parameters.options.convert
 import com.github.ajalt.clikt.parameters.options.default
+import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.multiple
 import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.types.path
 import com.github.kittinunf.fuel.core.Parameters
 import com.github.kittinunf.fuel.core.Request
 import com.github.kittinunf.fuel.core.extensions.authentication
@@ -12,14 +14,18 @@ import com.github.kittinunf.fuel.httpGet
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import kotlin.io.path.appendText
+import kotlin.io.path.createFile
+import kotlin.io.path.deleteIfExists
+import kotlin.io.path.exists
+import kotlin.io.path.isRegularFile
 
 class Downloader : CliktCommand() {
     val projectKeyFilterRegex by option(
-        "--project-filter", "-f",
+        "--project-filter", "-r",
         help = "A regex to filter the project keys from which to download hotspots by. Not setting this will not filter the projects."
     ).convert { it.toRegex() }
 
@@ -33,7 +39,7 @@ class Downloader : CliktCommand() {
     val projectKeys by option(
         "--project", "-p",
         help = "Specify the project keys to download hotspots from (will ignore project key regex option and not collect projects). You " +
-            "can specify multiple projects for which to download hotspots by using this option multiple times."
+                "can specify multiple projects for which to download hotspots by using this option multiple times."
     ).multiple()
 
     val baseUrl by option(
@@ -56,6 +62,21 @@ class Downloader : CliktCommand() {
         help = "Set the request timeout"
     ).convert { it.toInt() }
 
+    val outputfile by option(
+        "--outputfile", "-f",
+        help = "Specify the output file to write the hotspots to. If not specified, the hotspots will be printed to the console."
+    ).path(canBeDir = false)
+
+    val ruleKeys by option(
+        "--rule-key", "-k",
+        help = "Specify the rule key to filter hotspots by. You can specify multiple rule keys for which to download hotspots by using this option multiple times."
+    ).multiple()
+
+    val verbose by option(
+        "--verbose", "-v",
+        help = "Prints additional information."
+    ).flag()
+
     val authToken = System.getenv("SONAR_TOKEN")
 
     val json = Json {
@@ -70,18 +91,58 @@ class Downloader : CliktCommand() {
     private suspend fun runMultithreaded() {
         coroutineScope {
             relevantProjectKeys().map { projectId ->
-                launch {
-                    getAllResolvePagination<HotspotResults> { page: Int -> hotspotRequest(projectId, page) }
+                async {
+                    if (verbose) println("Downloading hotspots for $projectId...")
+                    val res = getAllResolvePagination<HotspotResults> { page: Int -> hotspotRequest(projectId, page) }
                         .flatMap { it.hotspots }
                         .filter { messageFilter?.matches(it.message) ?: true }
-                        //.filter { it.message.contains("The content length limit of") || it.message.contains("Make sure not setting any maximum content length limit is safe here.") }
-                        //.filter { it.message.contains("accessing the Android external storage") }
-                        //.filter { it.key.equals("java:S5693") }
-                        .forEach { hotspot -> println("$projectId: ${hotspotWebUrl(projectId, hotspot.key)}") }
+                        .toList()
+                    if (verbose) println("Downloaded ${res.size} hotspots for $projectId.")
+                    res
                 }
-            }.forEach { it.join() }
+            }.toList().flatMap {
+                runBlocking { it.await() }
+            }.map { hotspot ->
+                async {
+                    getHotspotDetails(hotspot)
+                }
+            }.map {
+                runBlocking { it.await() }
+            }.filter {
+                ruleKeys.isEmpty() || it.showHotspotView.rule.key in ruleKeys
+            }.forEach { (hotspot, showHotspotView) ->
+                val output: (String) -> Unit = outputfile?.let { file ->
+                    file.deleteIfExists()
+                    file.createFile()
+                    return@let { text -> file.appendText("$text\n") }
+                } ?: { println(it) }
+
+                output(
+                    "${showHotspotView.project.key}: [${showHotspotView.rule.key}] ${
+                        hotspotWebUrl(
+                            showHotspotView.project.key,
+                            hotspot.key
+                        )
+                    }"
+                )
+            }
         }
     }
+
+    private fun getHotspotDetails(hotspot: Hotspot) =
+        "$baseUrl/api/hotspots/show".authGet(
+            listOf(
+                "hotspot" to hotspot.key,
+            ).let { params ->
+                organization?.let { org ->
+                    params + ("organization" to org)
+                } ?: params
+            }
+        ).response().let { (_, response, _) ->
+            json.decodeFromString<ShowHotspotView>(response.body().asString("application/json"))
+        }.let {
+            DetailedHotspot(hotspot, it)
+        }
 
     private fun hotspotWebUrl(projectKey: String, issueKey: String) =
         "$baseUrl/security_hotspots?id=${projectKey}&hotspots=${issueKey}"
@@ -121,7 +182,7 @@ class Downloader : CliktCommand() {
                         null
                     }
                 }
-            }.toList().mapNotNull { (i: Int, deferred: Deferred<T?>) ->
+            }.toList().mapNotNull { (_: Int, deferred: Deferred<T?>) ->
                 runBlocking {
                     //println("done $i")
                     deferred.await()

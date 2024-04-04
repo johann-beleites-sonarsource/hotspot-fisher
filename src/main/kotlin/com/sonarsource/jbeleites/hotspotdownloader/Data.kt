@@ -26,6 +26,13 @@ data class Project(
 )
 
 @Serializable
+data class ReducedProject(
+    val key: String,
+    val name: String,
+    val qualifier: String,
+)
+
+@Serializable
 data class HotspotResults(override val paging: PagingInfo, val hotspots: List<Hotspot>) : Paginated
 
 @Serializable
@@ -42,3 +49,14 @@ data class Hotspot(
     val creationDate: String,
     val updateDate: String,
 )
+
+data class DetailedHotspot(
+    val hotspot: Hotspot,
+    val showHotspotView: ShowHotspotView,
+)
+
+@Serializable
+data class ShowHotspotView(val rule: Rule, val project: ReducedProject)
+
+@Serializable
+data class Rule(val key: String)
